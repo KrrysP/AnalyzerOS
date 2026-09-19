@@ -1,0 +1,963 @@
+{
+  "name": "AnalyzerOS - Analyzer v2 Row-Backed",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body ?? $json;\n\nconst question = String(body.question ?? '').trim();\nconst datasetId = String(body.dataset_id ?? '').trim();\nconst sessionId = String(\n  body.session_id ?? `session-${Date.now()}`\n).trim();\n\nif (!question) {\n  throw new Error('question is required');\n}\n\nif (!datasetId) {\n  throw new Error('dataset_id is required');\n}\n\nconst uuidRegex =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nif (!uuidRegex.test(datasetId)) {\n  throw new Error(\n    `Invalid dataset_id: ${datasetId}`\n  );\n}\n\nreturn [{\n  json: {\n    question,\n    dataset_id: datasetId,\n    session_id: sessionId,\n    organization_id:\n      body.organization_id ?? null,\n    user_id:\n      body.user_id ?? null\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "id": "7e087e61-bf40-4d9b-b936-6f43980af2fb",
+      "name": "Normalize Analysis Request"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT d.id::text AS dataset_id,d.name,d.original_filename,d.row_count_raw,d.row_count_clean,d.column_count,d.quality_score,d.domain,d.grain_description,d.grain_confidence,COALESCE((SELECT jsonb_agg(jsonb_build_object('column_name',c.column_name,'original_name',c.original_name,'detected_type',c.detected_type,'semantic_role',c.semantic_role,'business_meaning',c.business_meaning,'role_confidence',c.role_confidence,'null_pct',c.null_pct,'unique_count',c.unique_count,'sample_values',c.sample_values) ORDER BY c.column_name) FROM public.dealos_dataset_columns c WHERE c.dataset_id=d.id),'[]'::jsonb) AS columns,COALESCE((SELECT jsonb_agg(jsonb_build_object('metric_name',m.metric_name,'metric_type',m.metric_type,'source_columns',m.source_columns,'formula_description',m.formula_description,'confidence',m.confidence,'requires_confirmation',m.requires_confirmation,'is_approved',m.is_approved)) FROM public.dealos_dataset_metrics m WHERE m.dataset_id=d.id),'[]'::jsonb) AS metrics,COALESCE((SELECT jsonb_agg(jsonb_build_object('issue_type',q.issue_type,'column_name',q.column_name,'severity',q.severity,'details',q.details)) FROM public.dealos_quality_issues q WHERE q.dataset_id=d.id AND q.status='open'),'[]'::jsonb) AS quality_issues,COALESCE((SELECT jsonb_agg(jsonb_build_object('action',l.action,'column_name',l.column_name,'details',l.details,'rows_affected',l.rows_affected,'automatic',l.automatic) ORDER BY l.id) FROM public.dealos_cleaning_log l WHERE l.dataset_id=d.id),'[]'::jsonb) AS cleaning_log FROM public.dealos_datasets d WHERE d.id=$1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [$json.dataset_id] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        480,
+        0
+      ],
+      "id": "59294cfe-b2ee-4df9-ab0d-81d0b4bde2ee",
+      "name": "Load Dataset Context",
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const r=$('Normalize Analysis Request').first().json,c=$json;if(!c.dataset_id)throw new Error('Dataset not found.');return [{json:{question:r.question,dataset_id:r.dataset_id,session_id:r.session_id,dataset_context:{name:c.name,original_filename:c.original_filename,row_count_raw:c.row_count_raw,row_count_clean:c.row_count_clean,column_count:c.column_count,quality_score:c.quality_score,domain:c.domain,grain:{description:c.grain_description,confidence:c.grain_confidence},columns:c.columns,metrics:c.metrics,quality_issues:c.quality_issues,cleaning_log:c.cleaning_log}}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "id": "e9fb2105-f55b-4bc4-af43-a1dc7e416f79",
+      "name": "Build Analyst Input"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ JSON.stringify($json) }}",
+        "options": {
+          "systemMessage": "You are DealOS, an AI Business Intelligence Analyst. You analyze datasets uploaded dynamically by users and have no prebuilt schema knowledge. The input includes question, dataset_id, session_id, and dataset_context. Treat dataset_context as the source of truth. Never invent columns or reuse metric definitions from any other dataset. Uploaded rows are stored in public.dealos_dataset_rows(dataset_id,row_number,raw_data,clean_data). Analyze clean_data unless the user asks about raw-data quality. EVERY SQL query must filter dataset_id to the CURRENT dataset UUID. JSONB access: text clean_data->>'field'; numeric NULLIF(clean_data->>'field','')::numeric; boolean NULLIF(clean_data->>'field','')::boolean; timestamp NULLIF(clean_data->>'field','')::timestamptz. Use the PostgreSQL tool for any question requiring values, statistics, trends, rankings, comparisons, anomalies, drivers, or business conclusions. Candidate metrics with requires_confirmation=true are suggestions, not guaranteed definitions; state assumptions when using them. Distinguish verified findings, mathematical drivers, associations, hypotheses, and underlying root causes. Do not claim causality without evidence. Consider data-quality issues when setting confidence. Never silently impute values, remove outliers, merge categories, or make business-rule corrections. SQL must be read-only: SELECT/WITH only; never SELECT * and never write or query another dataset. Return ONLY valid JSON with exactly these fields: {\"original_question\":\"string\",\"dataset_id\":\"string\",\"headline\":\"string\",\"executive_summary\":\"string\",\"chat_answer\":\"markdown string\",\"analysis_type\":\"descriptive|comparative|diagnostic|exploratory|data_quality\",\"kpis\":[],\"key_drivers\":[],\"confirmed_findings\":[],\"ruled_out_or_weak_drivers\":[],\"remaining_uncertainties\":[],\"recommended_actions\":[],\"confidence\":\"high|medium|low\",\"confidence_reason\":\"string\",\"workspace_action\":{\"view\":\"overview|metrics|customers|products|geography|operations|data_quality|investigation\",\"focus\":\"string\"},\"visualizations\":[],\"evidence\":[]}. KPI object: {\"name\":\"string\",\"label\":\"string\",\"current_value\":0,\"previous_value\":null,\"change_absolute\":null,\"change_pct\":null,\"direction\":\"up|down|flat|na\",\"format\":\"currency|number|percent|decimal\"}. Driver object: {\"driver\":\"string\",\"driver_type\":\"mathematical|root_cause|association|hypothesis\",\"impact\":\"high|medium|low\",\"explanation\":\"string\",\"status\":\"verified|hypothesis|uncertain\"}. Recommended action: {\"action\":\"string\",\"reason\":\"string\"}. Visualization: {\"type\":\"kpi_card|line|bar|stacked_bar|table|scatter|histogram|map\",\"title\":\"string\",\"description\":\"string\",\"x_field\":\"string\",\"y_field\":\"string\",\"series_field\":\"string\",\"data\":[]}. Evidence: {\"source\":\"public.dealos_dataset_rows\",\"analysis\":\"string\",\"period\":\"string\",\"query_summary\":\"string\",\"facts\":{}}. Numeric fields must be JSON numbers. change_pct is a human percent like -13.5, not -0.135. Keep chart data compact.",
+          "maxIterations": 12,
+          "returnIntermediateSteps": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        992,
+        0
+      ],
+      "id": "b7bb438b-d7e0-4a80-acd9-b26bcebacb20",
+      "name": "DealOS Dynamic BI Analyst"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-5.4",
+          "mode": "list",
+          "cachedResultName": "gpt-5.4"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        832,
+        256
+      ],
+      "id": "1d974924-3f44-46e7-a339-dc881eff4bfc",
+      "name": "OpenAI - BI Analyst",
+      "credentials": {
+        "openAiApi": {
+          "id": "IgAjqopLkE0rVnkI",
+          "name": "OpenAI account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('Normalize Analysis Request').item.json.session_id }}",
+        "contextWindowLength": 12
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        1056,
+        256
+      ],
+      "id": "11ca1abc-49d0-4d82-aad7-4a3ff418cca4",
+      "name": "Analysis Conversation Memory"
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "READ-ONLY analytical SQL tool for the current uploaded dataset only. Table public.dealos_dataset_rows(dataset_id,row_number,raw_data,clean_data). Query clean_data JSONB. ALWAYS filter by current dataset_id. Text: clean_data->>'field'. Numeric: NULLIF(clean_data->>'field','')::numeric. Timestamp: NULLIF(clean_data->>'field','')::timestamptz. Never write.",
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*)::int AS row_count\nFROM public.dealos_dataset_rows\nWHERE dataset_id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [$('Build Analyst Input').first().json.dataset_id] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.6,
+      "position": [
+        1296,
+        256
+      ],
+      "id": "794682e8-e528-4f07-a546-106fe505d799",
+      "name": "Dataset SQL - Read Only",
+      "credentials": {
+        "postgres": {
+          "id": "lPwi7fT7FlmP0ECc",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const r=$('Normalize Analysis Request').first().json;const raw=$json.output??$json.text??$json.response??'';let cleaned=String(raw).trim().replace(/^```(?:json)?\\s*/i,'').replace(/\\s*```$/,'');let result;try{result=JSON.parse(cleaned);}catch(e){throw new Error('DealOS Analyst did not return valid JSON: '+cleaned.slice(0,1200));}const req=['original_question','dataset_id','headline','executive_summary','chat_answer','analysis_type','kpis','key_drivers','confirmed_findings','ruled_out_or_weak_drivers','remaining_uncertainties','recommended_actions','confidence','confidence_reason','workspace_action','visualizations','evidence'];const missing=req.filter(k=>!(k in result));if(missing.length)throw new Error('Missing response fields: '+missing.join(', '));if(result.dataset_id!==r.dataset_id)throw new Error('Analyst returned different dataset_id.');for(const f of ['kpis','key_drivers','confirmed_findings','ruled_out_or_weak_drivers','remaining_uncertainties','recommended_actions','visualizations','evidence'])if(!Array.isArray(result[f]))throw new Error(f+' must be an array');if(!['high','medium','low'].includes(result.confidence))throw new Error('Invalid confidence');result.meta={generated_at:new Date().toISOString(),backend:'n8n',storage:'supabase-postgresql-jsonb',contract_version:'2.0'};return [{json:result}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1312,
+        0
+      ],
+      "id": "98bb653b-180b-4c75-aa74-828042b94305",
+      "name": "Parse + Validate BI Result"
+    },
+    {
+      "parameters": {
+        "jsCode": "const req=$('Normalize Analysis Request').first().json,result=$json;function q(v){if(v===null||v===undefined)return 'NULL';return `'${String(v).replace(/'/g,\"''\")}'`;}const sql=`INSERT INTO public.dealos_investigations (dataset_id,organization_id,user_id,session_id,original_question,result_json,confidence) VALUES (${q(req.dataset_id)}::uuid,${q(req.organization_id)},${q(req.user_id)},${q(req.session_id)},${q(req.question)},${q(JSON.stringify(result))}::jsonb,${q(result.confidence)});`;return [{json:{...result,_save_sql:sql}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1552,
+        0
+      ],
+      "id": "2a5844b1-cb4f-487f-8c39-67174ee7936f",
+      "name": "Build Save Investigation SQL"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json._save_sql }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1792,
+        0
+      ],
+      "id": "843bdcb1-bc98-4c61-9a66-095a1f79ad46",
+      "name": "Save Investigation",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const r=$('Parse + Validate BI Result').first().json;return [{json:r}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2032,
+        0
+      ],
+      "id": "2113c7b1-2dc8-4f81-b402-be82c00fb745",
+      "name": "Restore BI Result"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        2288,
+        0
+      ],
+      "id": "72daf6af-f845-4f88-affa-aeb80a45a15f",
+      "name": "Return BI Result"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "analyzeros-ingest",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "ab7c72fc-8017-4707-9702-a14386199f7f",
+      "name": "Ingest Stored Dataset",
+      "webhookId": "fa8cfe78-a3b9-4dd5-b9da-f26987c4de5d"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "analyzeros-analyze-v2",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        912,
+        1536
+      ],
+      "id": "e45bdb87-563f-43ba-95f1-02deb808110d",
+      "name": "Analysis Webhook",
+      "webhookId": "20d77161-3c53-41eb-a5b8-412f84eeeb2d"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*)::int AS row_count\nFROM public.dealos_dataset_rows\nWHERE dataset_id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [$('Normalize Analysis Request1').first().json.dataset_id] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1616,
+        1536
+      ],
+      "id": "446baf71-2f04-41eb-a248-f6c4d225dc71",
+      "name": "Validate Persisted Rows",
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "8ed2de73-6e24-4a51-9f1f-053fa41f35d4",
+              "leftValue": "={{ Number($json.row_count || 0) }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1856,
+        1536
+      ],
+      "id": "b387c0da-2d6e-480f-9dd4-85a2d879eec8",
+      "name": "Rows Available?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $('Normalize Analysis Request1').first().json;\nreturn [{json:{\n  success:false,\n  error:'DATASET_ROWS_NOT_FOUND',\n  message:'The dataset metadata exists, but no persisted rows were found for this dataset ID.',\n  dataset_id:r.dataset_id\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2096,
+        1760
+      ],
+      "id": "17db79f6-1d3b-4afd-9649-2edb23568aa9",
+      "name": "Build No Rows Error"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 404
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        2336,
+        1760
+      ],
+      "id": "6f0f8558-7a74-4211-b5d3-d6a85ddafe04",
+      "name": "Return No Rows Error"
+    },
+    {
+      "parameters": {
+        "jsCode": "const req = $('Normalize Analysis Request1').first().json;\nconst ctx = $('Load Dataset Context1').first().json;\n\nconst columns = Array.isArray(ctx.columns) ? ctx.columns : [];\nconst metrics = Array.isArray(ctx.metrics) ? ctx.metrics : [];\n\nconst columnLines = columns.map(c =>\n  `- ${c.column_name} | type=${c.detected_type ?? 'unknown'} | role=${c.semantic_role ?? 'unknown'} | meaning=${c.business_meaning ?? ''}`\n).join('\\n');\n\nconst metricLines = metrics.map(m =>\n  `- ${m.name}: ${m.description ?? m.label ?? ''} | aggregation=${m.aggregation ?? ''} | expression=${m.expression ?? ''}`\n).join('\\n');\n\nconst plannerPrompt = `\nYou are the SQL planning layer for AnalyzerOS.\n\nUser question:\n${req.question}\n\nDataset domain:\n${ctx.domain ?? 'unknown'}\n\nDataset grain:\n${ctx.grain_description ?? 'unknown'}\n\nAvailable cleaned columns:\n${columnLines}\n\nApproved/suggested metrics:\n${metricLines}\n\nReturn ONLY JSON:\n{\n  \"analysis_type\": \"overview|metric|trend|segment|comparison|anomaly\",\n  \"sql\": \"SELECT ...\",\n  \"reason\": \"short explanation\"\n}\n\nSTRICT SQL RULES:\n1. PostgreSQL SELECT or WITH only.\n2. Query ONLY public.dealos_dataset_rows.\n3. Dataset values are in clean_data JSONB.\n4. Do NOT include any dataset_id filter. The backend injects it.\n5. Never use INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, TRUNCATE, COPY, GRANT, REVOKE.\n6. Never SELECT *.\n7. Keep result sets compact, generally <= 100 rows.\n8. Use NULLIF(...,'') before numeric casts.\n9. Use only the real cleaned column names listed above.\n10. For an overview, return one compact query with several useful aggregate values where possible.\n`;\n\nreturn [{json:{...req,dataset_context:ctx,planner_prompt:plannerPrompt}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2112,
+        1456
+      ],
+      "id": "d351f3cd-6f7a-41cf-ae92-e4d6e3e07210",
+      "name": "Build SQL Planner Input"
+    },
+    {
+      "parameters": {
+        "jsCode": "throw new Error('REPLACE THIS NODE with your existing OpenAI planner node. Input prompt is $json.planner_prompt. It must return JSON with analysis_type, sql, reason.');"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2368,
+        1456
+      ],
+      "id": "43e4077d-4133-471e-863c-b782fe41f8c9",
+      "name": "REPLACE - AI SQL Planner"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.output ?? $json.text ?? $json.response ?? $json;\nlet plan = raw;\nif (typeof raw === 'string') {\n  const cleaned = raw.trim().replace(/^```(?:json)?\\s*/i,'').replace(/\\s*```$/i,'');\n  plan = JSON.parse(cleaned);\n}\nif (!plan.sql || typeof plan.sql !== 'string') throw new Error('Planner response missing sql');\nreturn [{json:{...$('Build SQL Planner Input').first().json,analysis_plan:plan}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2624,
+        1456
+      ],
+      "id": "91666c05-d5a2-4bd5-8278-d11b0b89f21b",
+      "name": "Parse Analysis Plan"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $json;\nlet sql = String(item.analysis_plan?.sql ?? '').trim().replace(/;+\\s*$/g,'');\n\nif (!/^(select|with)\\b/i.test(sql)) throw new Error('Only SELECT or WITH queries are allowed');\nif (/\\b(insert|update|delete|drop|alter|create|truncate|copy|grant|revoke|merge|call|do)\\b/i.test(sql)) {\n  throw new Error('Unsafe SQL keyword detected');\n}\nif (!/\\bpublic\\.dealos_dataset_rows\\b/i.test(sql)) throw new Error('Query must use public.dealos_dataset_rows');\nif (/\\bdataset_id\\b/i.test(sql)) throw new Error('Planner must not supply dataset_id filtering');\n\nsql = sql.replace(\n  /\\bpublic\\.dealos_dataset_rows\\b/gi,\n  `(SELECT row_number, raw_data, clean_data\n    FROM public.dealos_dataset_rows\n    WHERE dataset_id = $1::uuid) AS dataset_rows`\n);\n\nsql = sql.replace(/AS dataset_rows\\s+AS\\s+/gi, 'AS dataset_rows ');\n\nreturn [{json:{...item,safe_sql:sql,dataset_id:item.dataset_id}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2864,
+        1456
+      ],
+      "id": "651976a5-18a5-4d5d-b90d-49a93372ef63",
+      "name": "Build + Validate Safe SQL"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.safe_sql }}",
+        "options": {
+          "queryReplacement": "={{ [$json.dataset_id] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3120,
+        1456
+      ],
+      "id": "2754ed41-f4b2-48b7-a134-4bf7cba7e925",
+      "name": "Execute Analytical SQL",
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const req = $('Normalize Analysis Request1').first().json;\nconst ctx = $('Load Dataset Context1').first().json;\nconst plan = $('Parse Analysis Plan').first().json.analysis_plan;\nconst rows = $input.all().map(x => x.json);\nreturn [{json:{\n  question:req.question,\n  dataset_id:req.dataset_id,\n  session_id:req.session_id,\n  dataset_context:ctx,\n  analysis_plan:plan,\n  query_results:rows,\n  evidence_available:rows.length>0\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3376,
+        1456
+      ],
+      "id": "17270ce7-7251-4e8d-9cf0-98d414316004",
+      "name": "Build Evidence Context"
+    },
+    {
+      "parameters": {
+        "jsCode": "const e=$json;\nconst finalPrompt=`\nYou are AnalyzerOS, an evidence-first data analyst.\n\nUser question:\n${e.question}\n\nDataset metadata:\n${JSON.stringify(e.dataset_context)}\n\nComputed query results:\n${JSON.stringify(e.query_results)}\n\nAnalysis plan:\n${JSON.stringify(e.analysis_plan)}\n\nRULES:\n- query_results are primary evidence.\n- dataset_context is supporting metadata only.\n- Do not invent totals, averages, trends, rankings, anomalies, or comparisons.\n- If query_results are empty, say the analysis could not be completed.\n- Use plain English.\n- Do not show SQL unless explicitly requested.\n\nReturn ONLY valid JSON:\n{\n  \"success\": true,\n  \"dataset_id\": \"${e.dataset_id}\",\n  \"original_question\": ${JSON.stringify(e.question)},\n  \"analysis_type\": \"descriptive\",\n  \"headline\": \"short headline\",\n  \"executive_summary\": \"2-5 sentence summary\",\n  \"chat_answer\": \"complete plain-English answer\",\n  \"confidence\": \"high|medium|low\",\n  \"kpis\": [],\n  \"charts\": [],\n  \"insights\": []\n}\n`;\nreturn [{json:{...e,final_prompt:finalPrompt}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3616,
+        1456
+      ],
+      "id": "fcba69fe-327a-4e01-9b12-bce47fe03999",
+      "name": "Build Final Analyst Prompt"
+    },
+    {
+      "parameters": {
+        "jsCode": "throw new Error('REPLACE THIS NODE with your existing OpenAI final analyst node. Input prompt is $json.final_prompt. It must return the requested JSON.');"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3872,
+        1456
+      ],
+      "id": "1f03242a-a419-443b-ae65-2bce09bc4988",
+      "name": "REPLACE - Final BI Analyst"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "analyzeros-sample-rows",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        912,
+        2064
+      ],
+      "id": "5f193130-fa34-4640-935c-bbdd5cb41db3",
+      "name": "Sample Rows Webhook",
+      "webhookId": "826eb412-ced7-4f06-aec9-bbb027eaa078"
+    },
+    {
+      "parameters": {
+        "jsCode": "const b=$json.body??$json;\nconst datasetId=String(b.dataset_id??'').trim();\nlet limit=Number(b.limit??50);\nif(!datasetId) throw new Error('dataset_id is required');\nif(!Number.isFinite(limit)) limit=50;\nlimit=Math.max(1,Math.min(100,Math.floor(limit)));\nreturn [{json:{dataset_id:datasetId,limit}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1168,
+        2064
+      ],
+      "id": "db3db2b8-05f8-41d5-bd6b-3029fbce22e6",
+      "name": "Normalize Sample Request"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT row_number, clean_data\nFROM public.dealos_dataset_rows\nWHERE dataset_id = $1::uuid\nORDER BY row_number\nLIMIT $2::int;",
+        "options": {
+          "queryReplacement": "={{ [$('Normalize Sample Request').first().json.dataset_id, $('Normalize Sample Request').first().json.limit] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1424,
+        2064
+      ],
+      "id": "7446a0c2-2e96-45b2-afe8-6beaa19a2042",
+      "name": "Load Sample Rows",
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const req=$('Normalize Sample Request').first().json;\nconst rows=$input.all().map(i=>({row_number:i.json.row_number,...((i.json.clean_data&&typeof i.json.clean_data==='object')?i.json.clean_data:{})}));\nreturn [{json:{success:true,dataset_id:req.dataset_id,rows,count:rows.length}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1664,
+        2064
+      ],
+      "id": "c14c833c-3088-4768-9051-9c13f4d4e0e7",
+      "name": "Build Sample Response"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1920,
+        2064
+      ],
+      "id": "f3379572-13f6-47be-9539-ea539435eb37",
+      "name": "Return Sample Rows"
+    },
+    {
+      "parameters": {
+        "jsCode": "const b = $json.body ?? $json;\nconst question = String(b.question ?? '').trim();\nconst datasetId = String(b.dataset_id ?? '').trim();\nconst sessionId = String(b.session_id ?? `session-${Date.now()}`);\n\nif (!question) throw new Error('question is required');\nif (!datasetId) throw new Error('dataset_id is required');\nif (!/^[0-9a-fA-F-]{36}$/.test(datasetId)) throw new Error('dataset_id must be a UUID');\n\nreturn [{\n  json: {\n    question,\n    dataset_id: datasetId,\n    session_id: sessionId,\n    organization_id: b.organization_id ?? null,\n    user_id: b.user_id ?? null\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1136,
+        1536
+      ],
+      "id": "ede3a448-2e2b-4138-a2af-a82c67abb99c",
+      "name": "Normalize Analysis Request1"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  d.id::text AS dataset_id,\n  d.name,\n  d.original_filename,\n  d.row_count_raw,\n  d.row_count_clean,\n  d.column_count,\n  d.quality_score,\n  d.domain,\n  d.grain_description,\n  d.grain_confidence,\n  COALESCE((\n    SELECT jsonb_agg(\n      jsonb_build_object(\n        'column_name', c.column_name,\n        'original_name', c.original_name,\n        'detected_type', c.detected_type,\n        'semantic_role', c.semantic_role,\n        'business_meaning', c.business_meaning,\n        'null_pct', c.null_pct,\n        'unique_count', c.unique_count,\n        'sample_values', c.sample_values\n      ) ORDER BY c.column_name\n    )\n    FROM public.dealos_dataset_columns c\n    WHERE c.dataset_id = d.id\n  ), '[]'::jsonb) AS columns,\n  COALESCE((\n    SELECT jsonb_agg(\n      jsonb_build_object(\n        'name', m.name,\n        'label', m.label,\n        'description', m.description,\n        'aggregation', m.aggregation,\n        'expression', m.expression,\n        'confidence', m.confidence\n      ) ORDER BY m.name\n    )\n    FROM public.dealos_dataset_metrics m\n    WHERE m.dataset_id = d.id\n  ), '[]'::jsonb) AS metrics\nFROM public.dealos_datasets d\nWHERE d.id = $1::uuid\nLIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ [$('Normalize Analysis Request1').first().json.dataset_id] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1376,
+        1536
+      ],
+      "id": "56cc8652-96ed-47f4-9594-10325922fdad",
+      "name": "Load Dataset Context1",
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw=$json.output ?? $json.text ?? $json.response ?? $json;\nlet result=raw;\nif(typeof raw==='string'){\n  const cleaned=raw.trim().replace(/^```(?:json)?\\s*/i,'').replace(/\\s*```$/i,'');\n  result=JSON.parse(cleaned);\n}\nconst evidence=$('Build Evidence Context').first().json;\nresult.success=true;\nresult.dataset_id=evidence.dataset_id;\nresult.original_question=evidence.question;\nresult.query_results=evidence.query_results;\nresult.evidence_available=evidence.evidence_available;\nreturn [{json:result}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4112,
+        1456
+      ],
+      "id": "2c600bae-a606-4645-9bd5-3763a5b31e42",
+      "name": "Parse + Validate BI Result1"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        4368,
+        1456
+      ],
+      "id": "1cafa282-d7f2-4a5b-9097-8473c9487d65",
+      "name": "Return BI Result1"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Normalize Analysis Request": {
+      "main": [
+        [
+          {
+            "node": "Load Dataset Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Dataset Context": {
+      "main": [
+        [
+          {
+            "node": "Build Analyst Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Analyst Input": {
+      "main": [
+        [
+          {
+            "node": "DealOS Dynamic BI Analyst",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DealOS Dynamic BI Analyst": {
+      "main": [
+        [
+          {
+            "node": "Parse + Validate BI Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - BI Analyst": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "DealOS Dynamic BI Analyst",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analysis Conversation Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "DealOS Dynamic BI Analyst",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dataset SQL - Read Only": {
+      "ai_tool": [
+        [
+          {
+            "node": "DealOS Dynamic BI Analyst",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse + Validate BI Result": {
+      "main": [
+        [
+          {
+            "node": "Build Save Investigation SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Save Investigation SQL": {
+      "main": [
+        [
+          {
+            "node": "Save Investigation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Investigation": {
+      "main": [
+        [
+          {
+            "node": "Restore BI Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore BI Result": {
+      "main": [
+        [
+          {
+            "node": "Return BI Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ingest Stored Dataset": {
+      "main": [
+        [
+          {
+            "node": "Normalize Analysis Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analysis Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Analysis Request1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Persisted Rows": {
+      "main": [
+        [
+          {
+            "node": "Rows Available?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rows Available?": {
+      "main": [
+        [
+          {
+            "node": "Build SQL Planner Input",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build No Rows Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build No Rows Error": {
+      "main": [
+        [
+          {
+            "node": "Return No Rows Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build SQL Planner Input": {
+      "main": [
+        [
+          {
+            "node": "REPLACE - AI SQL Planner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "REPLACE - AI SQL Planner": {
+      "main": [
+        [
+          {
+            "node": "Parse Analysis Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Analysis Plan": {
+      "main": [
+        [
+          {
+            "node": "Build + Validate Safe SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build + Validate Safe SQL": {
+      "main": [
+        [
+          {
+            "node": "Execute Analytical SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Analytical SQL": {
+      "main": [
+        [
+          {
+            "node": "Build Evidence Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Evidence Context": {
+      "main": [
+        [
+          {
+            "node": "Build Final Analyst Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Final Analyst Prompt": {
+      "main": [
+        [
+          {
+            "node": "REPLACE - Final BI Analyst",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "REPLACE - Final BI Analyst": {
+      "main": [
+        [
+          {
+            "node": "Parse + Validate BI Result1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sample Rows Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Sample Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Sample Request": {
+      "main": [
+        [
+          {
+            "node": "Load Sample Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Sample Rows": {
+      "main": [
+        [
+          {
+            "node": "Build Sample Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Sample Response": {
+      "main": [
+        [
+          {
+            "node": "Return Sample Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Analysis Request1": {
+      "main": [
+        [
+          {
+            "node": "Load Dataset Context1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Dataset Context1": {
+      "main": [
+        [
+          {
+            "node": "Validate Persisted Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse + Validate BI Result1": {
+      "main": [
+        [
+          {
+            "node": "Return BI Result1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "cd6ef20b-3a28-45a8-b2e7-8be139b1f400",
+  "meta": {
+    "instanceId": "3cee587dfec51ec5f6e51e633647359f49b85a286177af7315993073f322e54e"
+  },
+  "nodeGroups": [],
+  "id": "3PTWh546jr9Ud08h",
+  "tags": []
+}

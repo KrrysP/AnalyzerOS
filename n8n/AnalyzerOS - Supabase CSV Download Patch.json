@@ -1,0 +1,632 @@
+{
+  "name": "AnalyzerOS - Supabase CSV Download Patch",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "dealos-upload",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        2160,
+        1696
+      ],
+      "id": "026d8cd6-c954-41a2-b519-57fb6fd7182b",
+      "name": "Dataset Upload Webhook",
+      "webhookId": "a7be6942-07a8-4a7e-a6a0-a5f43e247f94"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ JSON.stringify($json.profile_for_ai) }}",
+        "options": {
+          "systemMessage": "You are the Dataset Intelligence layer for DealOS. You receive a deterministic dataset profile and a small sample of cleaned rows. Your job is semantic interpretation only. Do not modify rows and do not invent columns. Determine likely business domain, likely table grain, semantic role and business meaning of every column, candidate business metrics, useful dimensions, useful time fields, and risky cleaning suggestions requiring user approval. Roles: identifier, metric, dimension, time, boolean_flag, text, unknown. Only propose metrics derivable from existing columns. Be conservative. Candidate metrics that are not certain must set requires_confirmation=true. Safe cleaning has already normalized column names, null-like values, whitespace, high-confidence types, and exact duplicates. Never claim that outlier removal, imputation, category merging, business-rule correction, or record linkage was applied. Return ONLY valid JSON exactly: {\"domain\":\"string\",\"grain\":{\"description\":\"string\",\"confidence\":\"high|medium|low\"},\"columns\":[{\"column_name\":\"string\",\"semantic_role\":\"identifier|metric|dimension|time|boolean_flag|text|unknown\",\"business_meaning\":\"string\",\"confidence\":\"high|medium|low\"}],\"candidate_metrics\":[{\"metric_name\":\"string\",\"metric_type\":\"sum|count|count_distinct|average|ratio|rate\",\"source_columns\":[\"string\"],\"formula_description\":\"string\",\"confidence\":\"high|medium|low\",\"requires_confirmation\":true}],\"dimensions\":[\"string\"],\"time_fields\":[\"string\"],\"cleaning_suggestions\":[{\"column_name\":\"string\",\"suggestion\":\"string\",\"reason\":\"string\",\"severity\":\"low|medium|high\",\"requires_confirmation\":true}]}",
+          "maxIterations": 3,
+          "returnIntermediateSteps": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        3104,
+        1696
+      ],
+      "id": "e6a19ca7-daf8-420c-8cc4-a3e0ad8aaa1c",
+      "name": "Dataset Intelligence Agent"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-5.4",
+          "mode": "list",
+          "cachedResultName": "gpt-5.4"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        3088,
+        1936
+      ],
+      "id": "85099f8b-4d41-4820-9e09-8bc670c7b45d",
+      "name": "OpenAI - Dataset Intelligence",
+      "credentials": {
+        "openAiApi": {
+          "id": "IgAjqopLkE0rVnkI",
+          "name": "OpenAI account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw=$json.output??$json.text??$json.response??'';let cleaned=String(raw).trim().replace(/^```(?:json)?\\s*/i,'').replace(/\\s*```$/,'');let parsed;try{parsed=JSON.parse(cleaned);}catch(e){throw new Error('Dataset Intelligence did not return valid JSON: '+cleaned.slice(0,1000));}for(const k of ['domain','grain','columns','candidate_metrics','dimensions','time_fields','cleaning_suggestions'])if(!(k in parsed))throw new Error('Dataset Intelligence missing field: '+k);return [{json:parsed}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3376,
+        1696
+      ],
+      "id": "6148ccca-9be0-47a1-b33c-8f8e0fc8376f",
+      "name": "Parse Dataset Intelligence"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS public.dealos_datasets (id uuid PRIMARY KEY,organization_id text,user_id text,name text NOT NULL,original_filename text,row_count_raw integer NOT NULL,row_count_clean integer NOT NULL,column_count integer NOT NULL,quality_score numeric,domain text,grain_description text,grain_confidence text,status text NOT NULL DEFAULT 'ready',profile_json jsonb NOT NULL DEFAULT '{}'::jsonb,created_at timestamptz NOT NULL DEFAULT now());\nCREATE TABLE IF NOT EXISTS public.dealos_dataset_columns (dataset_id uuid NOT NULL REFERENCES public.dealos_datasets(id) ON DELETE CASCADE,column_name text NOT NULL,original_name text,detected_type text,semantic_role text,business_meaning text,role_confidence text,null_pct numeric,unique_count integer,unique_count_capped boolean,min_value numeric,max_value numeric,mean_value numeric,sample_values jsonb NOT NULL DEFAULT '[]'::jsonb,PRIMARY KEY (dataset_id,column_name));\nCREATE TABLE IF NOT EXISTS public.dealos_dataset_metrics (id bigserial PRIMARY KEY,dataset_id uuid NOT NULL REFERENCES public.dealos_datasets(id) ON DELETE CASCADE,metric_name text NOT NULL,metric_type text,source_columns jsonb NOT NULL DEFAULT '[]'::jsonb,formula_description text,confidence text,requires_confirmation boolean NOT NULL DEFAULT true,is_approved boolean NOT NULL DEFAULT false,created_at timestamptz NOT NULL DEFAULT now());\nCREATE TABLE IF NOT EXISTS public.dealos_cleaning_log (id bigserial PRIMARY KEY,dataset_id uuid NOT NULL REFERENCES public.dealos_datasets(id) ON DELETE CASCADE,action text NOT NULL,column_name text,details jsonb,rows_affected integer,automatic boolean NOT NULL DEFAULT true,created_at timestamptz NOT NULL DEFAULT now());\nCREATE TABLE IF NOT EXISTS public.dealos_quality_issues (id bigserial PRIMARY KEY,dataset_id uuid NOT NULL REFERENCES public.dealos_datasets(id) ON DELETE CASCADE,issue_type text NOT NULL,column_name text,severity text,details text,status text NOT NULL DEFAULT 'open',created_at timestamptz NOT NULL DEFAULT now());\nCREATE TABLE IF NOT EXISTS public.dealos_dataset_rows (dataset_id uuid NOT NULL REFERENCES public.dealos_datasets(id) ON DELETE CASCADE,row_number integer NOT NULL,raw_data jsonb NOT NULL,clean_data jsonb NOT NULL,PRIMARY KEY (dataset_id,row_number));\nCREATE INDEX IF NOT EXISTS dealos_dataset_rows_dataset_idx ON public.dealos_dataset_rows(dataset_id);\nCREATE TABLE IF NOT EXISTS public.dealos_investigations (id uuid PRIMARY KEY DEFAULT gen_random_uuid(),dataset_id uuid REFERENCES public.dealos_datasets(id) ON DELETE CASCADE,organization_id text,user_id text,session_id text,original_question text NOT NULL,result_json jsonb NOT NULL,confidence text,created_at timestamptz NOT NULL DEFAULT now());\nCREATE INDEX IF NOT EXISTS dealos_investigations_dataset_created_idx ON public.dealos_investigations(dataset_id,created_at DESC);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3600,
+        1696
+      ],
+      "id": "7de4e3da-d9f0-46d4-8f15-bb5dc86f2490",
+      "name": "Ensure DealOS Tables",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const profile = $('Build Final Dataset Profile').first().json;\nconst intelligence = $('Parse Dataset Intelligence').first().json;\n\n// --------------------------------------------------\n// Helpers\n// --------------------------------------------------\n\nfunction sqlString(value) {\n  if (value === null || value === undefined) {\n    return 'NULL';\n  }\n\n  return `'${String(value).replace(/'/g, \"''\")}'`;\n}\n\nfunction sqlJson(value) {\n  const json = JSON.stringify(value ?? null);\n  return `${sqlString(json)}::jsonb`;\n}\n\nfunction sqlNumber(value) {\n  if (value === null || value === undefined || value === '') {\n    return 'NULL';\n  }\n\n  const number = Number(value);\n\n  return Number.isFinite(number)\n    ? String(number)\n    : 'NULL';\n}\n\nfunction sqlBoolean(value) {\n  return value === true ? 'TRUE' : 'FALSE';\n}\n\n// --------------------------------------------------\n// Validate required data\n// --------------------------------------------------\n\nif (!profile) {\n  throw new Error('Build Final Dataset Profile returned no data');\n}\n\nif (!profile.dataset_id) {\n  throw new Error('Final dataset profile is missing dataset_id');\n}\n\nif (!intelligence) {\n  throw new Error('Parse Dataset Intelligence returned no data');\n}\n\n// Defensive arrays\nconst columnProfiles = Array.isArray(profile.column_profiles)\n  ? profile.column_profiles\n  : [];\n\nconst intelligenceColumns = Array.isArray(intelligence.columns)\n  ? intelligence.columns\n  : [];\n\nconst candidateMetrics = Array.isArray(intelligence.candidate_metrics)\n  ? intelligence.candidate_metrics\n  : [];\n\nconst cleaningLog = Array.isArray(profile.cleaning_log)\n  ? profile.cleaning_log\n  : [];\n\nconst cleaningSuggestions = Array.isArray(\n  intelligence.cleaning_suggestions\n)\n  ? intelligence.cleaning_suggestions\n  : [];\n\nconst qualityIssues = Array.isArray(profile.quality_issues)\n  ? profile.quality_issues\n  : [];\n\n// --------------------------------------------------\n// Semantic metadata lookup\n// --------------------------------------------------\n\nconst semanticByColumn = {};\n\nfor (const column of intelligenceColumns) {\n  if (!column || !column.column_name) continue;\n\n  semanticByColumn[column.column_name] = column;\n}\n\n// --------------------------------------------------\n// SQL statements\n// --------------------------------------------------\n\nconst statements = [];\n\n// --------------------------------------------------\n// Ensure supporting tables exist\n// --------------------------------------------------\n\nstatements.push(`\nCREATE TABLE IF NOT EXISTS public.dealos_dataset_columns (\n  dataset_id uuid NOT NULL\n    REFERENCES public.dealos_datasets(id)\n    ON DELETE CASCADE,\n\n  column_name text NOT NULL,\n  original_name text,\n  detected_type text,\n\n  semantic_role text,\n  business_meaning text,\n  role_confidence text,\n\n  null_pct numeric,\n\n  unique_count bigint,\n  unique_count_capped boolean DEFAULT true,\n\n  min_value numeric,\n  max_value numeric,\n  mean_value numeric,\n\n  sample_values jsonb NOT NULL DEFAULT '[]'::jsonb,\n\n  PRIMARY KEY (dataset_id, column_name)\n);\n`);\n\nstatements.push(`\nCREATE TABLE IF NOT EXISTS public.dealos_dataset_metrics (\n  id bigserial PRIMARY KEY,\n\n  dataset_id uuid NOT NULL\n    REFERENCES public.dealos_datasets(id)\n    ON DELETE CASCADE,\n\n  metric_name text NOT NULL,\n  metric_type text,\n\n  source_columns jsonb NOT NULL DEFAULT '[]'::jsonb,\n\n  formula_description text,\n\n  confidence text,\n\n  requires_confirmation boolean NOT NULL DEFAULT true,\n  is_approved boolean NOT NULL DEFAULT false,\n\n  created_at timestamptz NOT NULL DEFAULT now()\n);\n`);\n\nstatements.push(`\nCREATE TABLE IF NOT EXISTS public.dealos_cleaning_log (\n  id bigserial PRIMARY KEY,\n\n  dataset_id uuid NOT NULL\n    REFERENCES public.dealos_datasets(id)\n    ON DELETE CASCADE,\n\n  action text NOT NULL,\n  column_name text,\n\n  details jsonb,\n\n  rows_affected integer,\n\n  automatic boolean NOT NULL DEFAULT true,\n\n  created_at timestamptz NOT NULL DEFAULT now()\n);\n`);\n\nstatements.push(`\nCREATE TABLE IF NOT EXISTS public.dealos_quality_issues (\n  id bigserial PRIMARY KEY,\n\n  dataset_id uuid NOT NULL\n    REFERENCES public.dealos_datasets(id)\n    ON DELETE CASCADE,\n\n  issue_type text NOT NULL,\n\n  column_name text,\n\n  severity text,\n\n  details text,\n\n  status text NOT NULL DEFAULT 'open',\n\n  created_at timestamptz NOT NULL DEFAULT now()\n);\n`);\n\n// --------------------------------------------------\n// Update main dataset record\n// --------------------------------------------------\n\nstatements.push(`\nUPDATE public.dealos_datasets\nSET\n  row_count_raw =\n    ${sqlNumber(profile.row_count_raw)},\n\n  row_count_clean =\n    ${sqlNumber(profile.row_count_clean)},\n\n  column_count =\n    ${sqlNumber(profile.column_count)},\n\n  quality_score =\n    ${sqlNumber(profile.quality_score)},\n\n  domain =\n    ${sqlString(intelligence.domain ?? 'Unknown')},\n\n  grain_description =\n    ${sqlString(\n      intelligence.grain?.description ?? ''\n    )},\n\n  grain_confidence =\n    ${sqlString(\n      intelligence.grain?.confidence ?? 'low'\n    )},\n\n  status = 'ready',\n\n  profile_json =\n    ${sqlJson(profile.profile_for_ai ?? profile)}\n\nWHERE id =\n  ${sqlString(profile.dataset_id)}::uuid;\n`);\n\n// --------------------------------------------------\n// Replace column metadata\n// --------------------------------------------------\n\nstatements.push(`\nDELETE FROM public.dealos_dataset_columns\nWHERE dataset_id =\n  ${sqlString(profile.dataset_id)}::uuid;\n`);\n\nfor (const column of columnProfiles) {\n\n  if (!column || !column.column_name) {\n    continue;\n  }\n\n  const semantic =\n    semanticByColumn[column.column_name] ?? {};\n\n  statements.push(`\nINSERT INTO public.dealos_dataset_columns (\n  dataset_id,\n\n  column_name,\n  original_name,\n\n  detected_type,\n\n  semantic_role,\n  business_meaning,\n  role_confidence,\n\n  null_pct,\n\n  unique_count,\n  unique_count_capped,\n\n  min_value,\n  max_value,\n  mean_value,\n\n  sample_values\n)\nVALUES (\n  ${sqlString(profile.dataset_id)}::uuid,\n\n  ${sqlString(column.column_name)},\n  ${sqlString(column.original_name)},\n\n  ${sqlString(column.detected_type ?? 'unknown')},\n\n  ${sqlString(\n    semantic.semantic_role ?? 'unknown'\n  )},\n\n  ${sqlString(\n    semantic.business_meaning ?? ''\n  )},\n\n  ${sqlString(\n    semantic.confidence ?? 'low'\n  )},\n\n  ${sqlNumber(column.null_pct)},\n\n  ${sqlNumber(column.unique_count)},\n\n  ${sqlBoolean(\n    column.unique_count_capped !== false\n  )},\n\n  ${sqlNumber(column.min_value)},\n  ${sqlNumber(column.max_value)},\n  ${sqlNumber(column.mean_value)},\n\n  ${sqlJson(column.sample_values ?? [])}\n);\n`);\n}\n\n// --------------------------------------------------\n// Replace candidate metrics\n// --------------------------------------------------\n\nstatements.push(`\nDELETE FROM public.dealos_dataset_metrics\nWHERE dataset_id =\n  ${sqlString(profile.dataset_id)}::uuid;\n`);\n\nfor (const metric of candidateMetrics) {\n\n  if (!metric || !metric.metric_name) {\n    continue;\n  }\n\n  const requiresConfirmation =\n    metric.requires_confirmation !== false;\n\n  statements.push(`\nINSERT INTO public.dealos_dataset_metrics (\n  dataset_id,\n\n  metric_name,\n  metric_type,\n\n  source_columns,\n\n  formula_description,\n\n  confidence,\n\n  requires_confirmation,\n  is_approved\n)\nVALUES (\n  ${sqlString(profile.dataset_id)}::uuid,\n\n  ${sqlString(metric.metric_name)},\n\n  ${sqlString(\n    metric.metric_type ?? 'unknown'\n  )},\n\n  ${sqlJson(metric.source_columns ?? [])},\n\n  ${sqlString(\n    metric.formula_description ?? ''\n  )},\n\n  ${sqlString(\n    metric.confidence ?? 'low'\n  )},\n\n  ${sqlBoolean(requiresConfirmation)},\n\n  ${sqlBoolean(!requiresConfirmation)}\n);\n`);\n}\n\n// --------------------------------------------------\n// Replace automatic cleaning log\n// --------------------------------------------------\n\nstatements.push(`\nDELETE FROM public.dealos_cleaning_log\nWHERE dataset_id =\n  ${sqlString(profile.dataset_id)}::uuid;\n`);\n\nfor (const action of cleaningLog) {\n\n  if (!action || !action.action) {\n    continue;\n  }\n\n  statements.push(`\nINSERT INTO public.dealos_cleaning_log (\n  dataset_id,\n\n  action,\n\n  column_name,\n\n  details,\n\n  rows_affected,\n\n  automatic\n)\nVALUES (\n  ${sqlString(profile.dataset_id)}::uuid,\n\n  ${sqlString(action.action)},\n\n  ${sqlString(action.column_name ?? null)},\n\n  ${sqlJson(action)},\n\n  ${sqlNumber(action.rows_affected ?? 0)},\n\n  ${sqlBoolean(action.automatic !== false)}\n);\n`);\n}\n\n// --------------------------------------------------\n// Add AI cleaning suggestions\n// --------------------------------------------------\n\nfor (const suggestion of cleaningSuggestions) {\n\n  if (!suggestion) {\n    continue;\n  }\n\n  statements.push(`\nINSERT INTO public.dealos_cleaning_log (\n  dataset_id,\n\n  action,\n\n  column_name,\n\n  details,\n\n  rows_affected,\n\n  automatic\n)\nVALUES (\n  ${sqlString(profile.dataset_id)}::uuid,\n\n  'suggested_cleaning',\n\n  ${sqlString(\n    suggestion.column_name ?? null\n  )},\n\n  ${sqlJson(suggestion)},\n\n  0,\n\n  FALSE\n);\n`);\n}\n\n// --------------------------------------------------\n// Replace quality issues\n// --------------------------------------------------\n\nstatements.push(`\nDELETE FROM public.dealos_quality_issues\nWHERE dataset_id =\n  ${sqlString(profile.dataset_id)}::uuid;\n`);\n\nfor (const issue of qualityIssues) {\n\n  if (!issue) {\n    continue;\n  }\n\n  statements.push(`\nINSERT INTO public.dealos_quality_issues (\n  dataset_id,\n\n  issue_type,\n\n  column_name,\n\n  severity,\n\n  details,\n\n  status\n)\nVALUES (\n  ${sqlString(profile.dataset_id)}::uuid,\n\n  ${sqlString(\n    issue.issue_type ?? 'unknown'\n  )},\n\n  ${sqlString(\n    issue.column_name ?? null\n  )},\n\n  ${sqlString(\n    issue.severity ?? 'low'\n  )},\n\n  ${sqlString(\n    issue.details ?? ''\n  )},\n\n  'open'\n);\n`);\n}\n\n// --------------------------------------------------\n// Return SQL\n// --------------------------------------------------\n\nreturn [\n  {\n    json: {\n      dataset_id: profile.dataset_id,\n\n      row_count_raw:\n        profile.row_count_raw ?? 0,\n\n      row_count_clean:\n        profile.row_count_clean ?? 0,\n\n      column_count:\n        profile.column_count ?? 0,\n\n      quality_score:\n        profile.quality_score ?? null,\n\n      domain:\n        intelligence.domain ?? 'Unknown',\n\n      sql: statements.join('\\n')\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3856,
+        1696
+      ],
+      "id": "79e03649-da3e-4835-9dfb-415eef707aa1",
+      "name": "Build Dataset Ingestion SQL"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.sql }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        4096,
+        1696
+      ],
+      "id": "d5363f6b-4625-423b-9b06-b9155b498a7b",
+      "name": "Persist Dataset to Supabase",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const profile = $('Build Final Dataset Profile').first().json;\nconst intelligence = $('Parse Dataset Intelligence').first().json;\n\nif (!profile?.dataset_id) {\n  throw new Error('Missing dataset_id from Build Final Dataset Profile');\n}\n\nreturn [\n  {\n    json: {\n      success: true,\n\n      dataset_id: profile.dataset_id,\n      dataset_name: profile.dataset_name,\n      original_filename: profile.original_filename,\n\n      row_count_raw: profile.row_count_raw ?? 0,\n      row_count_clean: profile.row_count_clean ?? 0,\n      column_count: profile.column_count ?? 0,\n      quality_score: profile.quality_score ?? null,\n\n      domain: intelligence?.domain ?? 'Unknown',\n\n      grain: intelligence?.grain ?? {\n        description: '',\n        confidence: 'low'\n      },\n\n      columns: Array.isArray(intelligence?.columns)\n        ? intelligence.columns\n        : [],\n\n      metrics: Array.isArray(intelligence?.candidate_metrics)\n        ? intelligence.candidate_metrics\n        : [],\n\n      dimensions: Array.isArray(intelligence?.dimensions)\n        ? intelligence.dimensions\n        : [],\n\n      time_fields: Array.isArray(intelligence?.time_fields)\n        ? intelligence.time_fields\n        : [],\n\n      cleaning_log: Array.isArray(profile.cleaning_log)\n        ? profile.cleaning_log\n        : [],\n\n      quality_issues: Array.isArray(profile.quality_issues)\n        ? profile.quality_issues\n        : [],\n\n      cleaning_suggestions: Array.isArray(\n        intelligence?.cleaning_suggestions\n      )\n        ? intelligence.cleaning_suggestions\n        : []\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4336,
+        1696
+      ],
+      "id": "27c7341b-589b-4d1d-8281-a813c1b230d0",
+      "name": "Finish Dataset Ingestion"
+    },
+    {
+      "parameters": {
+        "jsCode": "const profile = $('Build Final Dataset Profile').first().json;\nconst i = $('Parse Dataset Intelligence').first().json;\n\nreturn [{\n  json: {\n    success: true,\n\n    dataset: {\n      id: profile.dataset_id,\n      name: profile.dataset_name,\n      original_filename: profile.original_filename,\n      row_count_raw: profile.row_count_raw ?? 0,\n      row_count_clean: profile.row_count_clean ?? 0,\n      column_count: profile.column_count ?? 0,\n      quality_score: profile.quality_score ?? null,\n      domain: i?.domain ?? 'Unknown',\n      grain: i?.grain ?? {\n        description: '',\n        confidence: 'low'\n      }\n    },\n\n    detected: {\n      columns: Array.isArray(i?.columns)\n        ? i.columns\n        : [],\n\n      metrics: Array.isArray(i?.candidate_metrics)\n        ? i.candidate_metrics\n        : [],\n\n      dimensions: Array.isArray(i?.dimensions)\n        ? i.dimensions\n        : [],\n\n      time_fields: Array.isArray(i?.time_fields)\n        ? i.time_fields\n        : []\n    },\n\n    cleaning: {\n      automatic_actions: Array.isArray(profile?.cleaning_log)\n        ? profile.cleaning_log\n        : [],\n\n      suggested_actions: Array.isArray(i?.cleaning_suggestions)\n        ? i.cleaning_suggestions\n        : [],\n\n      quality_issues: Array.isArray(profile?.quality_issues)\n        ? profile.quality_issues\n        : []\n    },\n\n    sample_rows: [],\n\n    next: {\n      analyze_endpoint: '/webhook/dealos-analyze',\n      suggested_question:\n        'Give me a general overview of this dataset, including the most important metrics, trends, segments, anomalies, and data limitations.'\n    }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4576,
+        1696
+      ],
+      "id": "b5a4e614-a985-487b-8b48-035f3c3397b3",
+      "name": "Build Upload Response"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        4816,
+        1696
+      ],
+      "id": "c1a1755a-6212-4e1b-9f57-91d4a3d0ca52",
+      "name": "Return Upload Result"
+    },
+    {
+      "parameters": {
+        "batchSize": 500,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1952,
+        1984
+      ],
+      "id": "d475e4c5-ac57-43f3-8e50-2a897ce65e7f",
+      "name": "Loop Over Items - 500"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nif (!items.length) return [];\nconst webhook = $('Dataset Upload Webhook').first();\nconst body = webhook.json?.body ?? webhook.json ?? {};\nfunction datasetId(){\n  const supplied=String(body.dataset_id ?? body.dataset_session_id ?? '').trim();\n  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(supplied)) return supplied;\n  const execId=String($execution.id ?? Date.now()).replace(/\\\\D/g,'').slice(-12).padStart(12,'0');\n  return `00000000-0000-4000-8000-${execId}`;\n}\nfunction snake(name){let s=String(name??'').trim().replace(/([a-z0-9])([A-Z])/g,'$1_$2').replace(/[^a-zA-Z0-9]+/g,'_').replace(/^_+|_+$/g,'').toLowerCase(); if(!s)s='column'; if(/^\\\\d/.test(s))s='col_'+s; return s;}\nfunction norm(v){if(v==null)return null; if(typeof v!=='string')return v; const t=v.trim(); if(!t||['null','none','n/a','na','nan','undefined'].includes(t.toLowerCase()))return null; return t;}\nfunction convert(v){v=norm(v); if(v===null)return null; if(typeof v!=='string')return v; const s=v.trim(), low=s.toLowerCase(); if(['true','yes','y'].includes(low))return true; if(['false','no','n'].includes(low))return false; if(!/^0\\\\d+$/.test(s)){const n=s.replace(/^\\\\$/,'').replace(/,/g,'').replace(/%$/,''); if(/^[-+]?(?:\\\\d+\\\\.?\\\\d*|\\\\.\\\\d+)$/.test(n)){const x=Number(n); if(Number.isFinite(x))return x;}} const looks=/^\\\\d{4}[-/]\\\\d{1,2}[-/]\\\\d{1,2}/.test(s)||/^\\\\d{1,2}[-/]\\\\d{1,2}[-/]\\\\d{2,4}/.test(s)||/^\\\\d{4}-\\\\d{2}-\\\\d{2}T/.test(s); if(looks){const ms=Date.parse(s); if(!Number.isNaN(ms))return new Date(ms).toISOString();} return s;}\nconst id=datasetId(); const batchNo=($runIndex??0)+1; const source=items.map(i=>i.json??{}); const cols=Object.keys(source[0]??{}); const map={}; const used=new Set(); for(const c of cols){let b=snake(c),n=b,k=2; while(used.has(n))n=`${b}_${k++}`; used.add(n); map[c]=n;}\nconst profile={}; for(const c of cols){const n=map[c]; profile[n]={original_name:c,column_name:n,null_count:0,non_null_count:0,numeric_count:0,boolean_count:0,timestamp_count:0,numeric_sum:0,numeric_min:null,numeric_max:null,sample_values:[]};}\nconst seen=new Set(), rows=[]; let dup=0;\nfor(const raw of source){const clean={}; for(const c of cols){const n=map[c],v=convert(raw[c]),p=profile[n]; clean[n]=v; if(v==null){p.null_count++; continue;} p.non_null_count++; if(typeof v==='number'){p.numeric_count++; p.numeric_sum+=v; p.numeric_min=p.numeric_min===null?v:Math.min(p.numeric_min,v); p.numeric_max=p.numeric_max===null?v:Math.max(p.numeric_max,v);} else if(typeof v==='boolean')p.boolean_count++; else if(typeof v==='string'&&/^\\\\d{4}-\\\\d{2}-\\\\d{2}T/.test(v))p.timestamp_count++; if(p.sample_values.length<6 && !p.sample_values.some(x=>String(x)===String(v)))p.sample_values.push(v);} const key=JSON.stringify(clean); if(seen.has(key)){dup++; continue;} seen.add(key); rows.push({raw_data:raw,clean_data:clean});}\nreturn [{json:{dataset_id:id,dataset_name:body.dataset_name||body.original_filename||'dataset',original_filename:body.original_filename||body.dataset_name||'dataset.csv',user_id:body.user_id??null,organization_id:body.organization_id??null,batch_no:batchNo,source_row_count:source.length,clean_row_count:rows.length,duplicate_rows_removed:dup,rows,batch_profile:Object.values(profile)}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2192,
+        2224
+      ],
+      "id": "d14fa3fe-85ec-414c-8d0f-4f89fcea5ee2",
+      "name": "Clean Current Batch"
+    },
+    {
+      "parameters": {
+        "jsCode": "const d=$json; function q(v){if(v==null)return 'NULL'; return `'${String(v).replace(/'/g,\"''\")}'`;} function j(v){return `${q(JSON.stringify(v))}::jsonb`;}\nconst base=(Number(d.batch_no)-1)*500;\nconst vals=(d.rows||[]).map((r,i)=>`(${q(d.dataset_id)}::uuid,${base+i+1},${j(r.raw_data)},${j(r.clean_data)})`).join(',');\nconst sql=`\nCREATE TABLE IF NOT EXISTS public.dealos_datasets (id uuid PRIMARY KEY, organization_id text, user_id text, name text NOT NULL, original_filename text, row_count_raw integer NOT NULL DEFAULT 0, row_count_clean integer NOT NULL DEFAULT 0, column_count integer NOT NULL DEFAULT 0, quality_score numeric, domain text, grain_description text, grain_confidence text, status text NOT NULL DEFAULT 'processing', profile_json jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL DEFAULT now());\nCREATE TABLE IF NOT EXISTS public.dealos_dataset_rows (dataset_id uuid NOT NULL REFERENCES public.dealos_datasets(id) ON DELETE CASCADE,row_number bigint NOT NULL,raw_data jsonb NOT NULL,clean_data jsonb NOT NULL,PRIMARY KEY(dataset_id,row_number));\nCREATE TABLE IF NOT EXISTS public.dealos_profile_batches (dataset_id uuid NOT NULL REFERENCES public.dealos_datasets(id) ON DELETE CASCADE,batch_no integer NOT NULL,source_row_count integer NOT NULL DEFAULT 0,clean_row_count integer NOT NULL DEFAULT 0,duplicate_rows_removed integer NOT NULL DEFAULT 0,profile_json jsonb NOT NULL,PRIMARY KEY(dataset_id,batch_no));\nINSERT INTO public.dealos_datasets(id,organization_id,user_id,name,original_filename,status) VALUES(${q(d.dataset_id)}::uuid,${q(d.organization_id)},${q(d.user_id)},${q(d.dataset_name)},${q(d.original_filename)},'processing') ON CONFLICT(id) DO NOTHING;\n${vals?`INSERT INTO public.dealos_dataset_rows(dataset_id,row_number,raw_data,clean_data) VALUES ${vals} ON CONFLICT(dataset_id,row_number) DO UPDATE SET raw_data=EXCLUDED.raw_data, clean_data=EXCLUDED.clean_data;`:''}\nINSERT INTO public.dealos_profile_batches(dataset_id,batch_no,source_row_count,clean_row_count,duplicate_rows_removed,profile_json) VALUES(${q(d.dataset_id)}::uuid,${Number(d.batch_no)},${Number(d.source_row_count||0)},${Number(d.clean_row_count||0)},${Number(d.duplicate_rows_removed||0)},${j(d.batch_profile)}) ON CONFLICT(dataset_id,batch_no) DO UPDATE SET source_row_count=EXCLUDED.source_row_count,clean_row_count=EXCLUDED.clean_row_count,duplicate_rows_removed=EXCLUDED.duplicate_rows_removed,profile_json=EXCLUDED.profile_json;`;\nreturn [{json:{dataset_id:d.dataset_id,sql}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2432,
+        2224
+      ],
+      "id": "87cfe2f3-9e77-406b-aac8-50949d411d15",
+      "name": "Build Current Batch SQL"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.sql }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2672,
+        2224
+      ],
+      "id": "9d7dbaf5-62b8-4227-b262-fea240dc7515",
+      "name": "Persist Current Batch",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  batch_no,\n  source_row_count,\n  clean_row_count,\n  duplicate_rows_removed,\n  profile_json\nFROM public.dealos_profile_batches\nWHERE dataset_id = $1::uuid\nORDER BY batch_no;",
+        "options": {
+          "queryReplacement": "={{ [$('Clean Current Batch').first().json.dataset_id] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2416,
+        1920
+      ],
+      "id": "4d00f9bf-d3ea-4100-91b6-a2a9678a6efb",
+      "name": "Load Batch Profiles",
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const counts = $('Get Final Dataset Counts').first().json;\nconst batchRows = $input.all().map(item => item.json);\n\nif (!counts) {\n  throw new Error('Get Final Dataset Counts returned no data');\n}\n\nconst rowCountRaw = Number(counts.row_count_raw ?? 0);\nconst rowCountClean = Number(counts.row_count_clean ?? 0);\n\nif (!batchRows.length) {\n  throw new Error('No batch profile rows received');\n}\n\nconst firstBatch = $('Clean Current Batch').first().json;\n\nconst columns = {};\nconst cleaningActions = {};\n\nlet duplicateRowsRemoved = 0;\n\n// --------------------------------------------------\n// Aggregate batch profiles\n// --------------------------------------------------\n\nfor (const batch of batchRows) {\n  duplicateRowsRemoved += Number(\n    batch.duplicate_rows_removed ?? 0\n  );\n\n  let profile = batch.profile_json;\n\n  if (typeof profile === 'string') {\n    try {\n      profile = JSON.parse(profile);\n    } catch {\n      profile = [];\n    }\n  }\n\n  if (!Array.isArray(profile)) {\n    profile = [];\n  }\n\n  for (const p of profile) {\n    if (!p?.column_name) continue;\n\n    const name = p.column_name;\n\n    if (!columns[name]) {\n      columns[name] = {\n        original_name: p.original_name ?? name,\n        column_name: name,\n\n        null_count: 0,\n        non_null_count: 0,\n\n        numeric_count: 0,\n        boolean_count: 0,\n        timestamp_count: 0,\n\n        numeric_sum: 0,\n        numeric_min: null,\n        numeric_max: null,\n\n        sample_values: []\n      };\n    }\n\n    const c = columns[name];\n\n    c.null_count += Number(p.null_count ?? 0);\n    c.non_null_count += Number(p.non_null_count ?? 0);\n\n    c.numeric_count += Number(p.numeric_count ?? 0);\n    c.boolean_count += Number(p.boolean_count ?? 0);\n    c.timestamp_count += Number(p.timestamp_count ?? 0);\n\n    c.numeric_sum += Number(p.numeric_sum ?? 0);\n\n    if (\n      p.numeric_min !== null &&\n      p.numeric_min !== undefined\n    ) {\n      const value = Number(p.numeric_min);\n\n      c.numeric_min =\n        c.numeric_min === null\n          ? value\n          : Math.min(c.numeric_min, value);\n    }\n\n    if (\n      p.numeric_max !== null &&\n      p.numeric_max !== undefined\n    ) {\n      const value = Number(p.numeric_max);\n\n      c.numeric_max =\n        c.numeric_max === null\n          ? value\n          : Math.max(c.numeric_max, value);\n    }\n\n    const samples = Array.isArray(p.sample_values)\n      ? p.sample_values\n      : [];\n\n    for (const value of samples) {\n      if (c.sample_values.length >= 8) break;\n\n      const serialized =\n        typeof value === 'object'\n          ? JSON.stringify(value)\n          : String(value);\n\n      const exists = c.sample_values.some(existing => {\n        const existingSerialized =\n          typeof existing === 'object'\n            ? JSON.stringify(existing)\n            : String(existing);\n\n        return existingSerialized === serialized;\n      });\n\n      if (!exists) {\n        c.sample_values.push(value);\n      }\n    }\n  }\n\n  // --------------------------------------------------\n  // Cleaning log aggregation\n  // --------------------------------------------------\n\n  let logs = batch.cleaning_log;\n\n  if (typeof logs === 'string') {\n    try {\n      logs = JSON.parse(logs);\n    } catch {\n      logs = [];\n    }\n  }\n\n  if (!Array.isArray(logs)) {\n    logs = [];\n  }\n\n  for (const log of logs) {\n    if (!log?.action) continue;\n\n    const key = log.action;\n\n    if (!cleaningActions[key]) {\n      cleaningActions[key] = {\n        action: key,\n        rows_affected: 0,\n        automatic: log.automatic !== false\n      };\n    }\n\n    cleaningActions[key].rows_affected += Number(\n      log.rows_affected ?? 0\n    );\n  }\n}\n\n// --------------------------------------------------\n// Build final column profiles\n// --------------------------------------------------\n\nconst columnProfiles = Object.values(columns).map(c => {\n  const nonNull = c.non_null_count || 1;\n\n  let detectedType = 'text';\n\n  if (c.boolean_count / nonNull >= 0.98) {\n    detectedType = 'boolean';\n  } else if (\n    c.timestamp_count / nonNull >= 0.95\n  ) {\n    detectedType = 'timestamp';\n  } else if (\n    c.numeric_count / nonNull >= 0.98\n  ) {\n    detectedType = 'numeric';\n  }\n\n  const nullPct =\n    rowCountClean > 0\n      ? Number(\n          (\n            (c.null_count * 100) /\n            rowCountClean\n          ).toFixed(2)\n        )\n      : 0;\n\n  return {\n    original_name: c.original_name,\n    column_name: c.column_name,\n\n    detected_type: detectedType,\n\n    null_count: c.null_count,\n    null_pct: nullPct,\n\n    unique_count: null,\n    unique_count_capped: true,\n\n    min_value: c.numeric_min,\n    max_value: c.numeric_max,\n\n    mean_value:\n      c.numeric_count > 0\n        ? c.numeric_sum / c.numeric_count\n        : null,\n\n    sample_values: c.sample_values\n  };\n});\n\n// --------------------------------------------------\n// Quality score\n// --------------------------------------------------\n\nconst totalCells =\n  Math.max(\n    rowCountClean *\n      Math.max(columnProfiles.length, 1),\n    1\n  );\n\nconst missingCells = columnProfiles.reduce(\n  (sum, column) =>\n    sum + Number(column.null_count ?? 0),\n  0\n);\n\nconst missingPct =\n  (missingCells * 100) / totalCells;\n\nconst duplicatePct =\n  rowCountRaw > 0\n    ? (duplicateRowsRemoved * 100) /\n      rowCountRaw\n    : 0;\n\nconst qualityScore = Math.max(\n  0,\n  Math.min(\n    100,\n    Math.round(\n      100 -\n        missingPct * 0.35 -\n        duplicatePct * 0.65\n    )\n  )\n);\n\n// --------------------------------------------------\n// Quality issues\n// --------------------------------------------------\n\nconst qualityIssues = [];\n\nfor (const column of columnProfiles) {\n  if (column.null_pct >= 20) {\n    qualityIssues.push({\n      issue_type: 'high_missingness',\n      column_name: column.column_name,\n      severity:\n        column.null_pct >= 50\n          ? 'high'\n          : 'medium',\n      details:\n        `${column.null_pct}% of values are missing`\n    });\n  }\n}\n\nif (duplicateRowsRemoved > 0) {\n  qualityIssues.push({\n    issue_type: 'exact_duplicates',\n    column_name: null,\n    severity:\n      duplicatePct >= 5\n        ? 'high'\n        : 'medium',\n    details:\n      `${duplicateRowsRemoved} duplicate rows were removed`\n  });\n}\n\n// --------------------------------------------------\n// Final profile for AI\n// --------------------------------------------------\n\nconst profileForAI = {\n  dataset_id: firstBatch.dataset_id,\n\n  dataset_name:\n    firstBatch.dataset_name ??\n    firstBatch.original_filename ??\n    'Dataset',\n\n  original_filename:\n    firstBatch.original_filename ??\n    firstBatch.dataset_name ??\n    null,\n\n  row_count_raw: rowCountRaw,\n  row_count_clean: rowCountClean,\n\n  column_count: columnProfiles.length,\n\n  quality_score: qualityScore,\n\n  columns: columnProfiles,\n\n  quality_issues: qualityIssues,\n\n  cleaning_log:\n    Object.values(cleaningActions),\n\n  sample_rows: []\n};\n\n// --------------------------------------------------\n// Return final dataset profile\n// --------------------------------------------------\n\nreturn [{\n  json: {\n    dataset_id: firstBatch.dataset_id,\n\n    dataset_name:\n      firstBatch.dataset_name ??\n      firstBatch.original_filename ??\n      'Dataset',\n\n    original_filename:\n      firstBatch.original_filename ??\n      firstBatch.dataset_name ??\n      null,\n\n    user_id:\n      firstBatch.user_id ?? null,\n\n    organization_id:\n      firstBatch.organization_id ?? null,\n\n    row_count_raw: rowCountRaw,\n    row_count_clean: rowCountClean,\n\n    column_count: columnProfiles.length,\n\n    quality_score: qualityScore,\n\n    duplicate_rows_removed:\n      duplicateRowsRemoved,\n\n    column_profiles: columnProfiles,\n\n    quality_issues: qualityIssues,\n\n    cleaning_log:\n      Object.values(cleaningActions),\n\n    profile_for_ai: profileForAI\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2672,
+        1920
+      ],
+      "id": "914e9600-312a-48c2-ab99-23087ef8c781",
+      "name": "Build Final Dataset Profile"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst body = $json.body ?? $json;\n\nconst bucket = String(body.storage_bucket ?? 'analyzeros-datasets').trim();\nconst path = String(body.storage_path ?? '').trim();\n\nif (!bucket) throw new Error('storage_bucket is required');\nif (!path) throw new Error('storage_path is required');\n\nreturn [{\n  json: {\n    storage_bucket: bucket,\n    storage_path: path,\n    dataset_name: body.dataset_name ?? body.original_filename ?? path.split('/').pop(),\n    original_filename: body.original_filename ?? path.split('/').pop(),\n    file_size: body.file_size ?? null,\n    dataset_session_id: body.dataset_session_id ?? null,\n    user_id: body.user_id ?? null,\n    organization_id: body.organization_id ?? null\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2352,
+        1520
+      ],
+      "id": "b917d206-2939-427b-b0ed-84bba25fc727",
+      "name": "Validate Storage Metadata"
+    },
+    {
+      "parameters": {
+        "url": "={{\n  'https://yvdpzxxxrxhkcwottngh.supabase.co/storage/v1/object/'\n  + encodeURIComponent($json.storage_bucket)\n  + '/'\n  + $json.storage_path\n      .split('/')\n      .map(encodeURIComponent)\n      .join('/')\n}}\n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl2ZHB6eHh4cnhoa2N3b3R0bmdoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NjE0NDAyMywiZXhwIjoyMTAxNzIwMDIzfQ.z8W1oXqOwGCvQwqnIQRMbkbw2uYja5NeFzpaazQmW5k"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl2ZHB6eHh4cnhoa2N3b3R0bmdoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NjE0NDAyMywiZXhwIjoyMTAxNzIwMDIzfQ.z8W1oXqOwGCvQwqnIQRMbkbw2uYja5NeFzpaazQmW5k"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2576,
+        1520
+      ],
+      "id": "40074387-0cc4-4a6f-8552-e8007ddb791e",
+      "name": "Download CSV from Supabase"
+    },
+    {
+      "parameters": {
+        "fileFormat": "csv",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.spreadsheetFile",
+      "typeVersion": 2,
+      "position": [
+        2800,
+        1520
+      ],
+      "id": "2d6dfab5-b20b-4b7d-8ddd-f903d198b3be",
+      "name": "Extract CSV"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst rows = $input.all();\n\nif (!rows.length) {\n  throw new Error('CSV produced no rows');\n}\n\nconst keys = Object.keys(rows[0].json ?? {});\nconst suspicious = [\n  'headers',\n  'body',\n  'params',\n  'query',\n  'webhookUrl',\n  'webhook_url'\n];\n\nconst suspiciousCount = suspicious.filter(k => keys.includes(k)).length;\n\nif (suspiciousCount >= 2) {\n  throw new Error(\n    'AnalyzerOS detected upload metadata instead of dataset contents. Check the Supabase download and Extract CSV nodes.'\n  );\n}\n\nreturn rows;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3024,
+        1520
+      ],
+      "id": "fee2b5ea-e774-40a3-aa33-89e7c11374f6",
+      "name": "Validate Parsed Dataset"
+    },
+    {
+      "parameters": {
+        "content": "# AnalyzerOS CSV Storage Download Patch\n\nPaste these nodes BEFORE your existing `Loop Over Items - 500`.\n\nConnect:\n\nDataset Upload Webhook\n→ Validate Storage Metadata\n→ Download CSV from Supabase\n→ Extract CSV\n→ Validate Parsed Dataset\n→ Loop Over Items - 500\n\nIMPORTANT:\n- Do NOT connect Dataset Upload Webhook directly to Loop Over Items.\n- Download CSV outputs the actual file as `binary.data`.\n- Extract CSV reads `binary.data` and emits actual CSV rows.\n- Validate Parsed Dataset rejects webhook metadata such as body/headers/params.\n\nThis patch uses n8n environment variables:\nSUPABASE_URL\nSUPABASE_SERVICE_ROLE_KEY\n\nIf n8n Cloud does not expose those env vars in expressions, replace the two expressions in the HTTP Request node with an n8n Header Auth credential or your secure n8n credential mechanism.\n\nNever put the service-role key in AnalyzerOS frontend code.\n"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3744,
+        2400
+      ],
+      "id": "b9b19c8a-7164-4f87-bfd9-38fe4c6dc9d4",
+      "name": "PATCH INSTRUCTIONS"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  COUNT(*)::int AS row_count_clean,\n  COUNT(*)::int AS row_count_raw\nFROM public.dealos_dataset_rows\nWHERE dataset_id = $1::uuid;",
+        "options": {
+          "queryReplacement": "={{ [$('Clean Current Batch').first().json.dataset_id] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        2176,
+        1952
+      ],
+      "id": "cdebcfec-d93e-48c5-8e94-5bf5ec794b67",
+      "name": "Get Final Dataset Counts",
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Dataset Upload Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Storage Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - Dataset Intelligence": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Dataset Intelligence Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dataset Intelligence Agent": {
+      "main": [
+        [
+          {
+            "node": "Parse Dataset Intelligence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Dataset Intelligence": {
+      "main": [
+        [
+          {
+            "node": "Ensure DealOS Tables",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure DealOS Tables": {
+      "main": [
+        [
+          {
+            "node": "Build Dataset Ingestion SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Dataset Ingestion SQL": {
+      "main": [
+        [
+          {
+            "node": "Persist Dataset to Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Dataset to Supabase": {
+      "main": [
+        [
+          {
+            "node": "Finish Dataset Ingestion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finish Dataset Ingestion": {
+      "main": [
+        [
+          {
+            "node": "Build Upload Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Upload Response": {
+      "main": [
+        [
+          {
+            "node": "Return Upload Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items - 500": {
+      "main": [
+        [
+          {
+            "node": "Get Final Dataset Counts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Clean Current Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean Current Batch": {
+      "main": [
+        [
+          {
+            "node": "Build Current Batch SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Current Batch SQL": {
+      "main": [
+        [
+          {
+            "node": "Persist Current Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Current Batch": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items - 500",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Batch Profiles": {
+      "main": [
+        [
+          {
+            "node": "Build Final Dataset Profile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Final Dataset Profile": {
+      "main": [
+        [
+          {
+            "node": "Dataset Intelligence Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Storage Metadata": {
+      "main": [
+        [
+          {
+            "node": "Download CSV from Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download CSV from Supabase": {
+      "main": [
+        [
+          {
+            "node": "Extract CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract CSV": {
+      "main": [
+        [
+          {
+            "node": "Validate Parsed Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Parsed Dataset": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items - 500",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Final Dataset Counts": {
+      "main": [
+        [
+          {
+            "node": "Load Batch Profiles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "6c5cd602-5c38-4a04-9261-5a0bbb269289",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "3cee587dfec51ec5f6e51e633647359f49b85a286177af7315993073f322e54e"
+  },
+  "nodeGroups": [],
+  "id": "tMAzIxuIX39qImc4",
+  "tags": []
+}

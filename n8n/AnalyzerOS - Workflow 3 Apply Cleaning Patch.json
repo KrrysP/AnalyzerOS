@@ -1,0 +1,522 @@
+{
+  "name": "AnalyzerOS - Workflow 3 Apply Cleaning Patch",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "analyzeros-clean",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        16,
+        400
+      ],
+      "id": "19ccb1f3-12eb-4119-8afa-8aed9ed32a68",
+      "name": "AnalyzerOS - Cleaning Decision",
+      "webhookId": "2f77c55c-b4b7-4099-8eeb-fb3de114e4b2"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body ?? $json;\n\nconst datasetId = String(body.dataset_id ?? '').trim();\nconst columnName =\n  body.column_name != null\n    ? String(body.column_name).trim()\n    : null;\n\nconst suggestion = String(body.suggestion ?? '').trim();\nconst decision = String(body.decision ?? '').trim().toLowerCase();\n\nconst userOverride =\n  body.user_override != null\n    ? String(body.user_override).trim()\n    : null;\n\nif (!datasetId) {\n  throw new Error('dataset_id is required');\n}\n\nconst uuidRegex =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nif (!uuidRegex.test(datasetId)) {\n  throw new Error('dataset_id must be a valid UUID');\n}\n\nif (!suggestion) {\n  throw new Error('suggestion is required');\n}\n\nif (!['approve', 'ignore', 'edit'].includes(decision)) {\n  throw new Error(\n    'decision must be approve, ignore, or edit'\n  );\n}\n\nif (decision === 'edit' && !userOverride) {\n  throw new Error(\n    'user_override is required when decision is edit'\n  );\n}\n\nreturn [{\n  json: {\n    dataset_id: datasetId,\n    column_name: columnName,\n    suggestion,\n    decision,\n    user_override: userOverride,\n    user_id: body.user_id ?? null,\n    organization_id: body.organization_id ?? null\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        256,
+        400
+      ],
+      "id": "58e7a571-2b7f-4253-bc25-c77c3c513835",
+      "name": "Validate Cleaning Decision"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS public.analyzeros_cleaning_decisions (\n    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),\n\n    dataset_id uuid NOT NULL\n        REFERENCES public.dealos_datasets(id)\n        ON DELETE CASCADE,\n\n    column_name text,\n\n    suggestion text NOT NULL,\n\n    decision text NOT NULL\n        CHECK (decision IN ('approve', 'ignore', 'edit')),\n\n    user_override text,\n\n    user_id text,\n    organization_id text,\n\n    status text NOT NULL DEFAULT 'recorded',\n\n    created_at timestamptz NOT NULL DEFAULT now()\n);\n\nCREATE INDEX IF NOT EXISTS\nanalyzeros_cleaning_decisions_dataset_idx\nON public.analyzeros_cleaning_decisions (\n    dataset_id,\n    created_at DESC\n);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        496,
+        400
+      ],
+      "id": "2723fa0b-8a82-4faa-a8e7-093481cab68d",
+      "name": "Ensure Cleaning Decisions Table",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pull the original request directly from the webhook.\n// This avoids losing fields after the Postgres \"Ensure Table\" node.\n\nconst webhook =\n  $('AnalyzerOS - Cleaning Decision').first().json;\n\nconst body = webhook.body ?? webhook;\n\n// --------------------------------------------------\n// Normalize incoming values\n// --------------------------------------------------\n\nconst datasetId =\n  String(body.dataset_id ?? '').trim();\n\nconst columnName =\n  body.column_name !== undefined &&\n  body.column_name !== null\n    ? String(body.column_name).trim()\n    : null;\n\nlet suggestion = body.suggestion;\n\nif (\n  suggestion !== null &&\n  typeof suggestion === 'object'\n) {\n  suggestion =\n    suggestion.suggestion ??\n    suggestion.description ??\n    suggestion.action ??\n    suggestion.details ??\n    JSON.stringify(suggestion);\n}\n\nsuggestion =\n  String(suggestion ?? '').trim();\n\nconst decision =\n  String(body.decision ?? '')\n    .trim()\n    .toLowerCase();\n\nconst userOverride =\n  body.user_override !== undefined &&\n  body.user_override !== null\n    ? String(body.user_override).trim()\n    : null;\n\nconst userId =\n  body.user_id ?? null;\n\nconst organizationId =\n  body.organization_id ?? null;\n\n// --------------------------------------------------\n// Validate\n// --------------------------------------------------\n\nif (!datasetId) {\n  throw new Error(\n    'dataset_id is missing from cleaning request'\n  );\n}\n\nconst uuidRegex =\n  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\nif (!uuidRegex.test(datasetId)) {\n  throw new Error(\n    `Invalid dataset_id received: ${datasetId}`\n  );\n}\n\nif (!suggestion) {\n  throw new Error(\n    'suggestion is missing from cleaning request'\n  );\n}\n\nif (\n  !['approve', 'ignore', 'edit'].includes(decision)\n) {\n  throw new Error(\n    `Invalid decision: ${decision}`\n  );\n}\n\nif (\n  decision === 'edit' &&\n  !userOverride\n) {\n  throw new Error(\n    'user_override is required for edit'\n  );\n}\n\n// --------------------------------------------------\n// SQL helper\n// --------------------------------------------------\n\nfunction q(value) {\n  if (\n    value === null ||\n    value === undefined ||\n    value === ''\n  ) {\n    return 'NULL';\n  }\n\n  return `'${String(value).replace(/'/g, \"''\")}'`;\n}\n\n// --------------------------------------------------\n// Build INSERT\n// --------------------------------------------------\n\nconst sql = `\nINSERT INTO public.analyzeros_cleaning_decisions (\n  dataset_id,\n  organization_id,\n  user_id,\n  column_name,\n  suggestion,\n  decision,\n  user_override,\n  status\n)\nVALUES (\n  ${q(datasetId)}::uuid,\n  ${q(organizationId)},\n  ${q(userId)},\n  ${q(columnName)},\n  ${q(suggestion)},\n  ${q(decision)},\n  ${q(userOverride)},\n  'recorded'\n)\nRETURNING\n  id::text,\n  dataset_id::text,\n  organization_id,\n  user_id,\n  column_name,\n  suggestion,\n  decision,\n  user_override,\n  status,\n  created_at;\n`;\n\nreturn [{\n  json: {\n    success: true,\n\n    dataset_id: datasetId,\n    column_name: columnName,\n    suggestion,\n    decision,\n    user_override: userOverride,\n\n    sql\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        752,
+        400
+      ],
+      "id": "8b9575fd-8fc8-4bf0-b608-ed5f0b6af848",
+      "name": "Build Decision SQL"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.sql }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1008,
+        400
+      ],
+      "id": "26e552ac-7d7e-4825-a16f-b8e695007bb5",
+      "name": "Save Cleaning Decision",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const saved = $json;\n\nreturn [{\n  json: {\n    success: true,\n\n    decision: {\n      id: saved.id ?? null,\n      dataset_id: saved.dataset_id,\n      column_name: saved.column_name ?? null,\n      suggestion: saved.suggestion,\n      decision: saved.decision,\n      user_override: saved.user_override ?? null,\n      status: saved.status ?? 'recorded',\n      created_at:\n        saved.created_at ?? new Date().toISOString()\n    },\n\n    message:\n      saved.decision === 'approve'\n        ? 'Cleaning recommendation approved.'\n        : saved.decision === 'ignore'\n        ? 'Cleaning recommendation ignored.'\n        : 'Cleaning recommendation updated.',\n\n    dataset_refresh_required: false\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1248,
+        400
+      ],
+      "id": "9284cc21-89fb-455e-bcf5-e379f7993121",
+      "name": "Build Cleaning Response"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1504,
+        400
+      ],
+      "id": "9aef980e-3c8d-4519-bbe7-2af471ef06d3",
+      "name": "Return Cleaning Result"
+    },
+    {
+      "parameters": {
+        "jsCode": "const webhook = $('AnalyzerOS - Cleaning Decision').first().json;\nconst body = webhook.body ?? webhook;\nconst decision = String(body.decision ?? '').trim().toLowerCase();\nconst actionType = String(body.action_type ?? body.transformation?.action_type ?? body.transformation?.type ?? '').trim().toLowerCase();\n\nconst executableTypes = [\n  'text_to_numeric','text_to_boolean','text_to_date',\n  'trim_strings','normalize_nulls','replace_null','map_categories'\n];\n\nlet route = 'semantic';\nif (decision === 'ignore') route = 'ignore';\nelse if (executableTypes.includes(actionType)) route = 'execute';\n\nreturn [{\n  json: {\n    dataset_id: body.dataset_id,\n    column_name: body.column_name ?? null,\n    suggestion: body.suggestion ?? '',\n    decision,\n    user_override: body.user_override ?? null,\n    action_type: actionType || 'semantic_interpretation',\n    params: body.transformation?.params ?? body.params ?? {},\n    route\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -192,
+        752
+      ],
+      "id": "d254967c-c409-4717-b81c-c3463167065a",
+      "name": "Route Cleaning Decision"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "ignore",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        32,
+        752
+      ],
+      "id": "bd180b2d-ea6f-4c9c-8c4a-0d26c74cd6ce",
+      "name": "Is Ignore?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "execute",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        256,
+        672
+      ],
+      "id": "ff9183e0-0d9f-40e7-8d5a-cc7322594095",
+      "name": "Is Executable?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $json;\n\nfunction ident(name) {\n  if (!name || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {\n    throw new Error(`Unsafe or invalid column_name: ${name}`);\n  }\n  return `\"${name.replace(/\"/g, '\"\"')}\"`;\n}\nfunction q(v) {\n  if (v === null || v === undefined) return 'NULL';\n  return `'${String(v).replace(/'/g, \"''\")}'`;\n}\n\nif (!d.dataset_id) throw new Error('dataset_id is required');\nif (!d.column_name) throw new Error('column_name is required');\n\nconst col = ident(d.column_name);\nconst datasetId = q(d.dataset_id);\nconst key = q(d.column_name);\nconst params = d.params ?? {};\nlet expr = null;\n\nswitch (d.action_type) {\n  case 'text_to_numeric':\n    expr = `CASE\n      WHEN NULLIF(TRIM(clean_data->>${key}), '') ~ '^[-+]?(\\\\d+\\\\.?\\\\d*|\\\\.\\\\d+)$'\n      THEN to_jsonb((clean_data->>${key})::numeric)\n      ELSE clean_data->${key}\n    END`;\n    break;\n\n  case 'text_to_boolean':\n    expr = `CASE\n      WHEN LOWER(TRIM(clean_data->>${key})) IN ('true','t','yes','y','1') THEN 'true'::jsonb\n      WHEN LOWER(TRIM(clean_data->>${key})) IN ('false','f','no','n','0') THEN 'false'::jsonb\n      ELSE clean_data->${key}\n    END`;\n    break;\n\n  case 'text_to_date':\n    expr = `CASE\n      WHEN NULLIF(TRIM(clean_data->>${key}), '') IS NULL THEN 'null'::jsonb\n      ELSE to_jsonb(TRIM(clean_data->>${key}))\n    END`;\n    break;\n\n  case 'trim_strings':\n    expr = `CASE\n      WHEN jsonb_typeof(clean_data->${key}) = 'string'\n      THEN to_jsonb(TRIM(clean_data->>${key}))\n      ELSE clean_data->${key}\n    END`;\n    break;\n\n  case 'normalize_nulls':\n    expr = `CASE\n      WHEN LOWER(TRIM(COALESCE(clean_data->>${key}, ''))) IN ('','null','none','n/a','na','nan','undefined')\n      THEN 'null'::jsonb\n      ELSE clean_data->${key}\n    END`;\n    break;\n\n  case 'replace_null':\n    if (!Object.prototype.hasOwnProperty.call(params, 'value')) {\n      throw new Error('replace_null requires params.value');\n    }\n    expr = `CASE\n      WHEN clean_data->${key} IS NULL OR clean_data->${key} = 'null'::jsonb\n      THEN ${q(JSON.stringify(params.value))}::jsonb\n      ELSE clean_data->${key}\n    END`;\n    break;\n\n  case 'map_categories':\n    if (!params.mapping || typeof params.mapping !== 'object' || Array.isArray(params.mapping)) {\n      throw new Error('map_categories requires params.mapping');\n    }\n    const cases = Object.entries(params.mapping)\n      .map(([from, to]) => `WHEN clean_data->>${key} = ${q(from)} THEN ${q(JSON.stringify(to))}::jsonb`)\n      .join('\\n');\n    expr = `CASE ${cases} ELSE clean_data->${key} END`;\n    break;\n\n  default:\n    throw new Error(`Unsupported action_type: ${d.action_type}`);\n}\n\nconst sql = `\nUPDATE public.dealos_dataset_rows\nSET clean_data = jsonb_set(\n  clean_data,\n  ARRAY[${key}],\n  ${expr},\n  true\n)\nWHERE dataset_id = ${datasetId}::uuid;\n`;\n\nreturn [{ json: { ...d, transformation_sql: sql } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        576
+      ],
+      "id": "2ed038e6-d14c-48ba-8576-d51755402635",
+      "name": "Build Transformation SQL"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.transformation_sql }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        704,
+        576
+      ],
+      "id": "c3b1dd19-f09c-4b41-b6f0-be6cf007a967",
+      "name": "Apply Approved Transformation",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $('Route Cleaning Decision').first().json;\nfunction q(v){ if(v===null||v===undefined) return 'NULL'; return `'${String(v).replace(/'/g,\"''\")}'`; }\n\nif (!d.column_name) return [{json:{...d,reprofile_sql:null}}];\n\nconst sql = `\nWITH stats AS (\n  SELECT\n    COUNT(*)::int AS row_count,\n    COUNT(*) FILTER (\n      WHERE clean_data->${q(d.column_name)} IS NULL\n         OR clean_data->${q(d.column_name)} = 'null'::jsonb\n    )::int AS null_count\n  FROM public.dealos_dataset_rows\n  WHERE dataset_id = ${q(d.dataset_id)}::uuid\n)\nUPDATE public.dealos_dataset_columns c\nSET null_pct =\n  CASE WHEN stats.row_count = 0 THEN 0\n       ELSE ROUND((stats.null_count::numeric * 100.0 / stats.row_count), 2)\n  END\nFROM stats\nWHERE c.dataset_id = ${q(d.dataset_id)}::uuid\n  AND c.column_name = ${q(d.column_name)};\n`;\n\nreturn [{json:{...d,reprofile_sql:sql}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        928,
+        576
+      ],
+      "id": "c178828f-c3f0-4484-bfe1-ff3b0043f7c5",
+      "name": "Build Reprofile SQL"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.reprofile_sql }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1152,
+        576
+      ],
+      "id": "905b3a1f-60d0-46c0-9f87-d7d70ac6d0a6",
+      "name": "Reprofile Affected Column",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const d=$json;\nfunction q(v){ if(v===null||v===undefined) return 'NULL'; return `'${String(v).replace(/'/g,\"''\")}'`; }\n\nconst interpretation = d.user_override || d.suggestion || 'Approved semantic interpretation';\n\nconst sql = `\nCREATE TABLE IF NOT EXISTS public.analyzeros_dataset_interpretations (\n  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),\n  dataset_id uuid NOT NULL REFERENCES public.dealos_datasets(id) ON DELETE CASCADE,\n  column_name text,\n  interpretation text NOT NULL,\n  action_type text,\n  source_decision text,\n  created_at timestamptz NOT NULL DEFAULT now()\n);\n\nINSERT INTO public.analyzeros_dataset_interpretations (\n  dataset_id,column_name,interpretation,action_type,source_decision\n)\nVALUES (\n  ${q(d.dataset_id)}::uuid,\n  ${q(d.column_name)},\n  ${q(interpretation)},\n  ${q(d.action_type)},\n  ${q(d.decision)}\n);\n`;\n\nreturn [{json:{...d,semantic_sql:sql,interpretation}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        928,
+        768
+      ],
+      "id": "c2a133b7-4f4c-47c4-945f-bf0b4df2cc50",
+      "name": "Build Semantic Interpretation SQL"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.semantic_sql }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1152,
+        768
+      ],
+      "id": "878859eb-d0b9-4b68-818b-d79fdf41849f",
+      "name": "Save Semantic Interpretation",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "ijA2b0Zshl9tsY3M",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $('Route Cleaning Decision').first().json;\nlet message = 'Cleaning decision recorded.';\nlet applied = false;\n\nif (d.route === 'ignore') message = 'Cleaning recommendation ignored.';\nelse if (d.route === 'semantic') message = 'Semantic interpretation saved for future analysis.';\nelse if (d.route === 'execute') {\n  message = 'Approved cleaning transformation applied.';\n  applied = true;\n}\n\nreturn [{\n  json: {\n    success: true,\n    dataset_id: d.dataset_id,\n    column_name: d.column_name,\n    decision: d.decision,\n    action_type: d.action_type,\n    route: d.route,\n    transformation_applied: applied,\n    dataset_refresh_required: applied,\n    message\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1376,
+        768
+      ],
+      "id": "af270486-21f2-491f-ba3a-52d6ed5eb3de",
+      "name": "Build Final Cleaning Response"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "AnalyzerOS - Cleaning Decision": {
+      "main": [
+        [
+          {
+            "node": "Validate Cleaning Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Cleaning Decision": {
+      "main": [
+        [
+          {
+            "node": "Ensure Cleaning Decisions Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure Cleaning Decisions Table": {
+      "main": [
+        [
+          {
+            "node": "Build Decision SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Decision SQL": {
+      "main": [
+        [
+          {
+            "node": "Save Cleaning Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Cleaning Decision": {
+      "main": [
+        [
+          {
+            "node": "Build Cleaning Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Cleaning Response": {
+      "main": [
+        [
+          {
+            "node": "Return Cleaning Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Cleaning Decision": {
+      "main": [
+        [
+          {
+            "node": "Is Ignore?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Ignore?": {
+      "main": [
+        [
+          {
+            "node": "Build Final Cleaning Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is Executable?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Executable?": {
+      "main": [
+        [
+          {
+            "node": "Build Transformation SQL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Semantic Interpretation SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Transformation SQL": {
+      "main": [
+        [
+          {
+            "node": "Apply Approved Transformation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Approved Transformation": {
+      "main": [
+        [
+          {
+            "node": "Build Reprofile SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Reprofile SQL": {
+      "main": [
+        [
+          {
+            "node": "Reprofile Affected Column",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reprofile Affected Column": {
+      "main": [
+        [
+          {
+            "node": "Build Final Cleaning Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Semantic Interpretation SQL": {
+      "main": [
+        [
+          {
+            "node": "Save Semantic Interpretation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Semantic Interpretation": {
+      "main": [
+        [
+          {
+            "node": "Build Final Cleaning Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Return Cleaning Result": {
+      "main": [
+        [
+          {
+            "node": "Route Cleaning Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "d5518699-90aa-4844-b70b-a1f72670faba",
+  "meta": {
+    "instanceId": "3cee587dfec51ec5f6e51e633647359f49b85a286177af7315993073f322e54e"
+  },
+  "nodeGroups": [],
+  "id": "6WeMVZIf8a4QwtQW",
+  "tags": []
+}
